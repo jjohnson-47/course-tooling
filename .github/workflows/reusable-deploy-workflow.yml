@@ -1,0 +1,107 @@
+# A\_0 Architectural Baseline — Course Deployment System
+
+> **Status:** Final. *This document is immutable.*
+> **Applies to:** Every repository, action, script, and guideline created under the Course Deployment System.
+
+---
+
+## 1  Purpose
+
+This baseline defines the **non‑negotiable architecture** for building, versioning, and deploying course websites and shared learning applets. All future specifications (Aₙ) **must conform** to every invariant herein; adaptations may extend or refine behaviour but **may not alter or contradict** any clause.
+
+## 2  Core Invariants
+
+1. **Repository Trinity**
+   • `<org>/course-tooling` — *tooling hub* (private)
+   • `<org>/<course>-src`   — *course source* (private)
+   • `<org>/<course>-site`  — *public site* (public, GitHub Pages)
+   The trinity is mandatory for every course‑level deliverable.
+
+2. **Single Source of Truth**
+   Course content (Markdown, assets, apps) resides **only** in the corresponding `*-src` repo. Generated artefacts are prohibited from version control in `*-src`.
+
+3. **Reusable Build Pipeline**
+   A GitHub Actions workflow located at
+
+   ```
+   course-tooling/.github/workflows/reusable-deploy-workflow.yml
+   ```
+
+   is the **sole canonical build definition**. Caller workflows must invoke it via
+
+   ```yaml
+   uses: <org>/course-tooling/.github/workflows/reusable-deploy-workflow.yml@vMAJOR
+   ```
+
+4. **Tag‑pinned Invocation**
+   Callers **must pin** to the latest published **major** tag (`v1`, `v2`, …); never to `main` or a commit SHA.
+
+5. **Output Directory**
+   The build process writes the fully rendered site to `_site/` at the repository root; this path is invariant.
+
+6. **Publish Branch**
+   All GitHub Pages deployments target the **`main`** branch of every `*-site` repository.
+
+7. **Security Boundary**
+   • `*-src` repos store the secret **`GH_TOKEN`** *(minimum necessary scopes)* for cross‑repo deploy.
+   • `course-tooling` never contains secrets.
+   • Secrets are rotated annually at minimum.
+
+8. **Directory Schema inside `*-src`**
+
+   ```text
+   source/
+   ├── lessons/   # Markdown lessons
+   ├── assets/    # Images, downloads, static files
+   └── apps/      # Self‑contained web apps (e.g., WebR applets)
+   ```
+
+   No other top‑level directories are permitted without A₀ addendum.
+
+9. **Canonical Build Steps**
+
+   ```text
+   1 Checkout caller repo
+   2 Checkout course‑tooling repo (same runner)
+   3 Render Markdown → HTML with Pandoc using tooling templates
+   4 Copy assets + apps
+   5 Deploy `_site/` to <course>-site@main via gh‑pages action
+   ```
+
+10. **Version Semantics for `course-tooling`**
+    • Semantic Versioning (MAJOR.MINOR.PATCH)
+    • Breaking changes require **MAJOR** bump.
+    • Minor/patch updates remain backward‑compatible to the preceding MAJOR line.
+
+11. **File Naming Conventions**
+    • Lessons: `YYYY-MM-DD-topic.md` or `NN-topic.md` (NN = module/lesson number)
+    • Assets: kebab‑case; no spaces.
+    • Apps: kebab‑case directory holding self‑contained build.
+
+---
+
+## 3  Rationale (Informative)
+
+These invariants guarantee:
+
+* **Reproducibility** — Any contributor can clone, build, and obtain identical `_site` output.
+* **Isolation** — Tooling updates roll out centrally; course content remains unaffected unless opted‑in via tag bump.
+* **Security** — Secrets live only where needed, and public artefacts never expose source.
+* **Scalability** — The pattern scales horizontally to any number of courses or shared applets without structural drift.
+
+---
+
+## 4  Compliance Test
+
+Every new repository or pull request **must** pass an automated "A₀ Compliance" CI job that checks:
+
+* Presence and path of caller workflow invoking the tagged reusable workflow.
+* Adherence to directory schema.
+* Absence of generated files in `*-src` other than `_site` artefacts inside the Actions workspace.
+
+---
+
+## 5  Change Control
+
+A₀ is immutable. Any proposed alteration constitutes a *new architecture* and requires explicit project‑wide consensus to create **A₀′**; otherwise, adaptations must remain within the epsilon (|Aₙ − A₀| → 0) of these invariants.
+
