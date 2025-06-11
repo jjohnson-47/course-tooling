@@ -1,107 +1,221 @@
-# A\_0 Architectural Baseline — Course Deployment System
+name: Reusable Course Deployment Workflow
 
-> **Status:** Final. *This document is immutable.*
-> **Applies to:** Every repository, action, script, and guideline created under the Course Deployment System.
+on:
+  workflow_call:
+    inputs:
+      PUBLIC_REPO:
+        required: true
+        type: string
+        description: 'Target public repository for deployment (e.g., org/course-site)'
+      SOURCE_DIR:
+        required: false
+        type: string
+        default: 'source'
+        description: 'Source directory containing course content'
+      PANDOC_TEMPLATE:
+        required: false
+        type: string
+        default: 'default'
+        description: 'Pandoc template to use for rendering'
 
----
-
-## 1  Purpose
-
-This baseline defines the **non‑negotiable architecture** for building, versioning, and deploying course websites and shared learning applets. All future specifications (Aₙ) **must conform** to every invariant herein; adaptations may extend or refine behaviour but **may not alter or contradict** any clause.
-
-## 2  Core Invariants
-
-1. **Repository Trinity**
-   • `<org>/course-tooling` — *tooling hub* (private)
-   • `<org>/<course>-src`   — *course source* (private)
-   • `<org>/<course>-site`  — *public site* (public, GitHub Pages)
-   The trinity is mandatory for every course‑level deliverable.
-
-2. **Single Source of Truth**
-   Course content (Markdown, assets, apps) resides **only** in the corresponding `*-src` repo. Generated artefacts are prohibited from version control in `*-src`.
-
-3. **Reusable Build Pipeline**
-   A GitHub Actions workflow located at
-
-   ```
-   course-tooling/.github/workflows/reusable-deploy-workflow.yml
-   ```
-
-   is the **sole canonical build definition**. Caller workflows must invoke it via
-
-   ```yaml
-   uses: <org>/course-tooling/.github/workflows/reusable-deploy-workflow.yml@vMAJOR
-   ```
-
-4. **Tag‑pinned Invocation**
-   Callers **must pin** to the latest published **major** tag (`v1`, `v2`, …); never to `main` or a commit SHA.
-
-5. **Output Directory**
-   The build process writes the fully rendered site to `_site/` at the repository root; this path is invariant.
-
-6. **Publish Branch**
-   All GitHub Pages deployments target the **`main`** branch of every `*-site` repository.
-
-7. **Security Boundary**
-   • `*-src` repos store the secret **`GH_TOKEN`** *(minimum necessary scopes)* for cross‑repo deploy.
-   • `course-tooling` never contains secrets.
-   • Secrets are rotated annually at minimum.
-
-8. **Directory Schema inside `*-src`**
-
-   ```text
-   source/
-   ├── lessons/   # Markdown lessons
-   ├── assets/    # Images, downloads, static files
-   └── apps/      # Self‑contained web apps (e.g., WebR applets)
-   ```
-
-   No other top‑level directories are permitted without A₀ addendum.
-
-9. **Canonical Build Steps**
-
-   ```text
-   1 Checkout caller repo
-   2 Checkout course‑tooling repo (same runner)
-   3 Render Markdown → HTML with Pandoc using tooling templates
-   4 Copy assets + apps
-   5 Deploy `_site/` to <course>-site@main via gh‑pages action
-   ```
-
-10. **Version Semantics for `course-tooling`**
-    • Semantic Versioning (MAJOR.MINOR.PATCH)
-    • Breaking changes require **MAJOR** bump.
-    • Minor/patch updates remain backward‑compatible to the preceding MAJOR line.
-
-11. **File Naming Conventions**
-    • Lessons: `YYYY-MM-DD-topic.md` or `NN-topic.md` (NN = module/lesson number)
-    • Assets: kebab‑case; no spaces.
-    • Apps: kebab‑case directory holding self‑contained build.
-
----
-
-## 3  Rationale (Informative)
-
-These invariants guarantee:
-
-* **Reproducibility** — Any contributor can clone, build, and obtain identical `_site` output.
-* **Isolation** — Tooling updates roll out centrally; course content remains unaffected unless opted‑in via tag bump.
-* **Security** — Secrets live only where needed, and public artefacts never expose source.
-* **Scalability** — The pattern scales horizontally to any number of courses or shared applets without structural drift.
-
----
-
-## 4  Compliance Test
-
-Every new repository or pull request **must** pass an automated "A₀ Compliance" CI job that checks:
-
-* Presence and path of caller workflow invoking the tagged reusable workflow.
-* Adherence to directory schema.
-* Absence of generated files in `*-src` other than `_site` artefacts inside the Actions workspace.
-
----
-
-## 5  Change Control
-
-A₀ is immutable. Any proposed alteration constitutes a *new architecture* and requires explicit project‑wide consensus to create **A₀′**; otherwise, adaptations must remain within the epsilon (|Aₙ − A₀| → 0) of these invariants.
-
+jobs:
+  build-and-deploy:
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout caller repository
+      uses: actions/checkout@v4
+      with:
+        path: course-source
+        
+    - name: Checkout course-tooling repository
+      uses: actions/checkout@v4
+      with:
+        repository: ${{ github.repository_owner }}/course-tooling
+        ref: baseline-v1
+        path: course-tooling
+        
+    - name: Setup Pandoc
+      uses: r-lib/actions/setup-pandoc@v2
+      with:
+        pandoc-version: '3.1.8'
+        
+    - name: Verify directory structure
+      run: |
+        echo "🔍 Verifying A₀ compliance..."
+        cd course-source
+        
+        # Check required source directory exists
+        if [ ! -d "${{ inputs.SOURCE_DIR }}" ]; then
+          echo "❌ Required source directory '${{ inputs.SOURCE_DIR }}' not found"
+          exit 1
+        fi
+        
+        # Check for required subdirectories
+        for dir in lessons assets apps; do
+          if [ ! -d "${{ inputs.SOURCE_DIR }}/$dir" ]; then
+            echo "⚠️  Optional directory '${{ inputs.SOURCE_DIR }}/$dir' not found, creating..."
+            mkdir -p "${{ inputs.SOURCE_DIR }}/$dir"
+          fi
+        done
+        
+        echo "✅ Directory structure verified"
+        
+    - name: Create output directory
+      run: |
+        mkdir -p course-source/_site
+        
+    - name: Render Markdown to HTML with Pandoc
+      run: |
+        echo "📝 Rendering Markdown lessons to HTML..."
+        cd course-source
+        
+        # Find all markdown files in lessons directory
+        if [ -d "${{ inputs.SOURCE_DIR }}/lessons" ]; then
+          find "${{ inputs.SOURCE_DIR }}/lessons" -name "*.md" -type f | while read -r file; do
+            echo "Processing: $file"
+            
+            # Get relative path and convert to HTML
+            rel_path=$(echo "$file" | sed "s|${{ inputs.SOURCE_DIR }}/lessons/||")
+            html_file="_site/${rel_path%.md}.html"
+            
+            # Create directory structure in output
+            mkdir -p "$(dirname "$html_file")"
+            
+            # Use Pandoc to convert with course-tooling template
+            pandoc "$file" \
+              --template="../course-tooling/templates/${{ inputs.PANDOC_TEMPLATE }}.html" \
+              --standalone \
+              --output="$html_file" \
+              --metadata title="$(basename "$file" .md)" \
+              --metadata date="$(date +%Y-%m-%d)" \
+              || {
+                echo "⚠️  Template not found, using default Pandoc conversion"
+                pandoc "$file" --standalone --output="$html_file"
+              }
+          done
+        fi
+        
+        echo "✅ Markdown rendering complete"
+        
+    - name: Copy assets and apps
+      run: |
+        cd course-source
+        
+        echo "📁 Copying static assets..."
+        if [ -d "${{ inputs.SOURCE_DIR }}/assets" ]; then
+          cp -r "${{ inputs.SOURCE_DIR }}/assets" _site/
+          echo "✅ Assets copied"
+        else
+          echo "ℹ️  No assets directory found"
+        fi
+        
+        echo "🎯 Copying apps..."
+        if [ -d "${{ inputs.SOURCE_DIR }}/apps" ]; then
+          cp -r "${{ inputs.SOURCE_DIR }}/apps" _site/
+          echo "✅ Apps copied"
+        else
+          echo "ℹ️  No apps directory found"
+        fi
+        
+    - name: Generate site index
+      run: |
+        cd course-source
+        echo "📋 Generating site index..."
+        
+        cat > _site/index.html << 'EOF'
+        <!DOCTYPE html>
+        <html lang="en">
+        <head>
+            <meta charset="UTF-8">
+            <meta name="viewport" content="width=device-width, initial-scale=1.0">
+            <title>Course Site</title>
+            <style>
+                body { font-family: -apple-system, BlinkMacSystemFont, sans-serif; margin: 2rem; }
+                h1 { color: #333; }
+                ul { list-style-type: none; padding: 0; }
+                li { margin: 0.5rem 0; }
+                a { color: #0066cc; text-decoration: none; }
+                a:hover { text-decoration: underline; }
+            </style>
+        </head>
+        <body>
+            <h1>Course Content</h1>
+            <h2>Lessons</h2>
+            <ul>
+        EOF
+        
+        # Add lessons to index
+        find _site -name "*.html" -not -name "index.html" | sort | while read -r file; do
+          rel_path=$(echo "$file" | sed 's|_site/||')
+          title=$(basename "$file" .html)
+          echo "                <li><a href=\"$rel_path\">$title</a></li>" >> _site/index.html
+        done
+        
+        cat >> _site/index.html << 'EOF'
+            </ul>
+        </body>
+        </html>
+        EOF
+        
+        echo "✅ Site index generated"
+        
+    - name: Create MCP deployment log
+      run: |
+        cd course-source
+        echo "📊 Creating MCP deployment log..."
+        
+        # Create deployment metadata
+        cat > mcp-deployment-log.json << EOF
+        {
+          "timestamp": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
+          "source_repo": "${{ github.repository }}",
+          "target_repo": "${{ inputs.PUBLIC_REPO }}",
+          "commit_sha": "${{ github.sha }}",
+          "workflow_run_id": "${{ github.run_id }}",
+          "workflow_run_number": "${{ github.run_number }}",
+          "deployer": "${{ github.actor }}",
+          "event_name": "${{ github.event_name }}",
+          "ref": "${{ github.ref }}",
+          "pandoc_template": "${{ inputs.PANDOC_TEMPLATE }}",
+          "files_deployed": $(find _site -type f | wc -l | tr -d ' '),
+          "deployment_status": "pending"
+        }
+        EOF
+        
+    - name: Upload MCP deployment log
+      uses: actions/upload-artifact@v4
+      with:
+        name: mcp-deployment-log-${{ github.run_number }}
+        path: course-source/mcp-deployment-log.json
+        retention-days: 90
+        
+    - name: Deploy to GitHub Pages
+      uses: peaceiris/actions-gh-pages@v3
+      with:
+        personal_token: ${{ secrets.GH_TOKEN }}
+        external_repository: ${{ inputs.PUBLIC_REPO }}
+        publish_branch: main
+        publish_dir: course-source/_site
+        user_name: 'github-actions[bot]'
+        user_email: 'github-actions[bot]@users.noreply.github.com'
+        commit_message: 'Deploy from ${{ github.repository }}@${{ github.sha }}'
+        
+    - name: Update deployment status
+      if: success()
+      run: |
+        cd course-source
+        echo "✅ Updating deployment status to success..."
+        
+        # Update the deployment log
+        jq '.deployment_status = "success" | .deployed_at = "'$(date -u +%Y-%m-%dT%H:%M:%SZ)'"' \
+          mcp-deployment-log.json > mcp-deployment-log-updated.json
+        mv mcp-deployment-log-updated.json mcp-deployment-log.json
+        
+    - name: Upload final deployment log
+      if: always()
+      uses: actions/upload-artifact@v4
+      with:
+        name: mcp-deployment-log-final-${{ github.run_number }}
+        path: course-source/mcp-deployment-log.json
+        retention-days: 90

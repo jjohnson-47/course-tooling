@@ -1,0 +1,14 @@
+name: Publish course site
+
+on:
+  push:
+    branches: [ main ]
+  workflow_dispatch:
+
+jobs:
+  deploy:
+    uses: ./.github/workflows/reusable-deploy-workflow.yml@baseline-v1
+    with:
+      # Replace 'demo-site' with your actual public site repository name
+      PUBLIC_REPO: ${{ github.repository_owner }}/demo-site
+    secrets: inherit
