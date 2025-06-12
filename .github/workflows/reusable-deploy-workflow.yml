@@ -193,7 +193,7 @@ jobs:
     - name: Deploy to GitHub Pages
       uses: peaceiris/actions-gh-pages@v4
       with:
-        personal_token: ${{ secrets.GH_TOKEN }}
+        github_token: ${{ secrets.GH_TOKEN }}
         external_repository: ${{ inputs.PUBLIC_REPO }}
         publish_branch: main
         publish_dir: course-source/_site
