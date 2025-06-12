@@ -195,7 +195,7 @@ jobs:
       with:
         personal_token: ${{ secrets.GH_TOKEN }}
         external_repository: ${{ inputs.PUBLIC_REPO }}
-        publish_branch: main
+        publish_branch: gh-pages
         publish_dir: course-source/_site
         user_name: 'github-actions[bot]'
         user_email: 'github-actions[bot]@users.noreply.github.com'
