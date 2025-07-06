@@ -1,0 +1,376 @@
+name: Reusable Course Deployment Workflow v2
+
+on:
+  workflow_call:
+    inputs:
+      # Core inputs
+      PUBLIC_REPO:
+        required: true
+        type: string
+        description: 'Target public repository for deployment (e.g., org/course-site)'
+      SOURCE_DIR:
+        required: false
+        type: string
+        default: 'source'
+        description: 'Source directory containing course content'
+      PANDOC_TEMPLATE:
+        required: false
+        type: string
+        default: 'default'
+        description: 'Pandoc template to use for rendering'
+      
+      # Base/Semester support
+      BASE_REPO:
+        required: false
+        type: string
+        description: 'Base course repository to inherit from (e.g., math253-base)'
+      SEMESTER_INSTANCE:
+        required: false
+        type: boolean
+        default: false
+        description: 'Whether this is a semester instance (requires BASE_REPO)'
+      MERGE_STRATEGY:
+        required: false
+        type: string
+        default: 'none'
+        description: 'How to merge base and semester content (none|semester-override|deep-merge)'
+      
+      # Additional metadata
+      COURSE_CODE:
+        required: false
+        type: string
+        description: 'Course code (e.g., MATH253)'
+      COURSE_TITLE:
+        required: false
+        type: string
+        description: 'Course title'
+      SEMESTER:
+        required: false
+        type: string
+        description: 'Semester (e.g., Spring 2025)'
+
+jobs:
+  build-and-deploy:
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout caller repository
+      uses: actions/checkout@v4
+      with:
+        path: course-source
+        
+    - name: Checkout base repository (if semester instance)
+      if: inputs.SEMESTER_INSTANCE && inputs.BASE_REPO != ''
+      uses: actions/checkout@v4
+      with:
+        repository: ${{ github.repository_owner }}/${{ inputs.BASE_REPO }}
+        path: course-base
+        token: ${{ secrets.GH_TOKEN }}
+        
+    - name: Checkout course-tooling repository
+      uses: actions/checkout@v4
+      with:
+        repository: ${{ github.repository_owner }}/course-tooling
+        ref: baseline-v1
+        path: course-tooling
+        
+    - name: Setup build tools
+      run: |
+        # Install Pandoc
+        wget https://github.com/jgm/pandoc/releases/download/3.1.8/pandoc-3.1.8-1-amd64.deb
+        sudo dpkg -i pandoc-3.1.8-1-amd64.deb
+        
+        # Install yq for YAML processing
+        sudo wget -qO /usr/local/bin/yq https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64
+        sudo chmod +x /usr/local/bin/yq
+        
+    - name: Merge base and semester content
+      if: inputs.SEMESTER_INSTANCE
+      run: |
+        echo "🔀 Merging base and semester content..."
+        
+        # Create build directory
+        mkdir -p build-output
+        
+        # Copy base content first
+        if [ -d "course-base/content" ]; then
+          echo "📁 Copying base content..."
+          cp -r course-base/content build-output/
+        fi
+        
+        if [ -d "course-base/assets" ]; then
+          echo "📁 Copying base assets..."
+          cp -r course-base/assets build-output/
+        fi
+        
+        if [ -d "course-base/assignments" ]; then
+          echo "📁 Copying base assignments..."
+          cp -r course-base/assignments build-output/
+        fi
+        
+        # Apply semester overrides
+        if [ "${{ inputs.MERGE_STRATEGY }}" = "semester-override" ]; then
+          echo "📝 Applying semester overrides..."
+          
+          # Override with semester-specific content
+          if [ -d "course-source/overrides" ]; then
+            cp -r course-source/overrides/* build-output/content/ 2>/dev/null || true
+          fi
+          
+          # Add semester-specific assignments
+          if [ -d "course-source/assignments" ]; then
+            cp -r course-source/assignments/* build-output/assignments/ 2>/dev/null || true
+          fi
+          
+          # Copy semester-specific files
+          for file in syllabus.md schedule.md; do
+            if [ -f "course-source/$file" ]; then
+              cp "course-source/$file" build-output/
+            fi
+          done
+        fi
+        
+        # Merge configurations
+        if [ -f "course-base/config.yml" ] && [ -f "course-source/config.yml" ]; then
+          echo "⚙️ Merging configurations..."
+          yq eval-all 'select(fileIndex == 0) * select(fileIndex == 1)' \
+            course-base/config.yml course-source/config.yml > build-output/config.yml
+        fi
+        
+        # Use merged content as source
+        echo "SOURCE_DIR=build-output" >> $GITHUB_ENV
+        
+    - name: Prepare content directory
+      run: |
+        # Determine source directory
+        if [ "${{ inputs.SEMESTER_INSTANCE }}" = "true" ]; then
+          SOURCE_DIR="${SOURCE_DIR:-build-output}"
+        else
+          SOURCE_DIR="course-source/${{ inputs.SOURCE_DIR }}"
+        fi
+        
+        echo "📂 Using source directory: $SOURCE_DIR"
+        echo "FINAL_SOURCE_DIR=$SOURCE_DIR" >> $GITHUB_ENV
+        
+        # Create output directory
+        mkdir -p course-source/_site
+        
+    - name: Process and render content
+      run: |
+        echo "📝 Processing course content..."
+        cd course-source
+        
+        SOURCE_DIR="${FINAL_SOURCE_DIR}"
+        
+        # Process different content types
+        for content_type in content lessons assignments exams; do
+          if [ -d "$SOURCE_DIR/$content_type" ]; then
+            echo "Processing $content_type..."
+            
+            find "$SOURCE_DIR/$content_type" -name "*.md" -type f | while read -r file; do
+              echo "  📄 $file"
+              
+              # Calculate output path
+              rel_path="${file#$SOURCE_DIR/}"
+              html_file="_site/${rel_path%.md}.html"
+              
+              # Create directory
+              mkdir -p "$(dirname "$html_file")"
+              
+              # Extract metadata if semester instance
+              if [ "${{ inputs.SEMESTER_INSTANCE }}" = "true" ] && [ -f "../$SOURCE_DIR/config.yml" ]; then
+                COURSE_TITLE=$(yq '.course.title' "../$SOURCE_DIR/config.yml")
+                SEMESTER=$(yq '.semester.term' "../$SOURCE_DIR/config.yml")
+                INSTRUCTOR=$(yq '.instructor.name' "../$SOURCE_DIR/config.yml")
+              else
+                COURSE_TITLE="${{ inputs.COURSE_TITLE }}"
+                SEMESTER="${{ inputs.SEMESTER }}"
+                INSTRUCTOR=""
+              fi
+              
+              # Render with Pandoc
+              pandoc "$file" \
+                --template="../course-tooling/templates/${{ inputs.PANDOC_TEMPLATE }}.html" \
+                --standalone \
+                --output="$html_file" \
+                --metadata course="${{ inputs.COURSE_CODE }}" \
+                --metadata title="$(yq '.title' "$file" 2>/dev/null || echo "$(basename "$file" .md)")" \
+                --metadata semester="$SEMESTER" \
+                --metadata instructor="$INSTRUCTOR" \
+                --katex \
+                || pandoc "$file" --standalone --output="$html_file"
+            done
+          fi
+        done
+        
+        # Copy static files
+        for dir in assets apps images data css js; do
+          if [ -d "$SOURCE_DIR/$dir" ]; then
+            echo "📁 Copying $dir..."
+            cp -r "$SOURCE_DIR/$dir" _site/
+          fi
+        done
+        
+    - name: Generate navigation and index
+      run: |
+        cd course-source
+        echo "🧭 Generating navigation..."
+        
+        # Create index with course information
+        cat > _site/index.html << 'EOF'
+        <!DOCTYPE html>
+        <html lang="en">
+        <head>
+            <meta charset="UTF-8">
+            <meta name="viewport" content="width=device-width, initial-scale=1.0">
+            <title>${{ inputs.COURSE_CODE }} - ${{ inputs.COURSE_TITLE }}</title>
+            <style>
+                body { 
+                    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; 
+                    max-width: 1200px;
+                    margin: 0 auto;
+                    padding: 2rem;
+                }
+                .header {
+                    background: #f0f0f0;
+                    padding: 2rem;
+                    border-radius: 8px;
+                    margin-bottom: 2rem;
+                }
+                .content-grid {
+                    display: grid;
+                    grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+                    gap: 2rem;
+                }
+                .content-section {
+                    background: #fff;
+                    border: 1px solid #ddd;
+                    border-radius: 8px;
+                    padding: 1.5rem;
+                }
+                h1, h2 { color: #333; }
+                ul { list-style-type: none; padding: 0; }
+                li { margin: 0.5rem 0; }
+                a { color: #0066cc; text-decoration: none; }
+                a:hover { text-decoration: underline; }
+            </style>
+        </head>
+        <body>
+            <div class="header">
+                <h1>${{ inputs.COURSE_CODE }}: ${{ inputs.COURSE_TITLE }}</h1>
+        EOF
+        
+        # Add semester info if available
+        if [ "${{ inputs.SEMESTER_INSTANCE }}" = "true" ]; then
+          echo "                <p><strong>Semester:</strong> ${{ inputs.SEMESTER }}</p>" >> _site/index.html
+        fi
+        
+        echo '            </div>' >> _site/index.html
+        echo '            <div class="content-grid">' >> _site/index.html
+        
+        # Add sections for different content types
+        for section in "Lessons:content" "Assignments:assignments" "Resources:resources"; do
+          IFS=':' read -r title dir <<< "$section"
+          if [ -d "_site/$dir" ] && [ -n "$(find "_site/$dir" -name "*.html" 2>/dev/null)" ]; then
+            echo "                <div class=\"content-section\">" >> _site/index.html
+            echo "                    <h2>$title</h2>" >> _site/index.html
+            echo "                    <ul>" >> _site/index.html
+            
+            find "_site/$dir" -name "*.html" | sort | while read -r file; do
+              rel_path="${file#_site/}"
+              title=$(grep -o '<title>.*</title>' "$file" | sed 's/<[^>]*>//g' || basename "$file" .html)
+              echo "                        <li><a href=\"$rel_path\">$title</a></li>" >> _site/index.html
+            done
+            
+            echo "                    </ul>" >> _site/index.html
+            echo "                </div>" >> _site/index.html
+          fi
+        done
+        
+        # Add syllabus and schedule if present
+        if [ -f "_site/syllabus.html" ] || [ -f "_site/schedule.html" ]; then
+          echo "                <div class=\"content-section\">" >> _site/index.html
+          echo "                    <h2>Course Information</h2>" >> _site/index.html
+          echo "                    <ul>" >> _site/index.html
+          [ -f "_site/syllabus.html" ] && echo "                        <li><a href=\"syllabus.html\">Syllabus</a></li>" >> _site/index.html
+          [ -f "_site/schedule.html" ] && echo "                        <li><a href=\"schedule.html\">Schedule</a></li>" >> _site/index.html
+          echo "                    </ul>" >> _site/index.html
+          echo "                </div>" >> _site/index.html
+        fi
+        
+        echo '            </div>' >> _site/index.html
+        echo '        </body>' >> _site/index.html
+        echo '        </html>' >> _site/index.html
+        
+        echo "✅ Navigation generated"
+        
+    - name: Create deployment metadata
+      run: |
+        cd course-source
+        echo "📊 Creating deployment metadata..."
+        
+        # Determine deployment type
+        if [ "${{ inputs.SEMESTER_INSTANCE }}" = "true" ]; then
+          DEPLOY_TYPE="semester-instance"
+          BASE_REF="${{ inputs.BASE_REPO }}"
+        else
+          DEPLOY_TYPE="base-course"
+          BASE_REF="none"
+        fi
+        
+        # Create comprehensive metadata
+        cat > _site/deployment-metadata.json << EOF
+        {
+          "timestamp": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
+          "deployment_type": "$DEPLOY_TYPE",
+          "source_repo": "${{ github.repository }}",
+          "target_repo": "${{ inputs.PUBLIC_REPO }}",
+          "base_repo": "$BASE_REF",
+          "merge_strategy": "${{ inputs.MERGE_STRATEGY }}",
+          "course": {
+            "code": "${{ inputs.COURSE_CODE }}",
+            "title": "${{ inputs.COURSE_TITLE }}",
+            "semester": "${{ inputs.SEMESTER }}"
+          },
+          "build": {
+            "commit_sha": "${{ github.sha }}",
+            "workflow_run_id": "${{ github.run_id }}",
+            "workflow_run_number": "${{ github.run_number }}",
+            "deployer": "${{ github.actor }}",
+            "event_name": "${{ github.event_name }}",
+            "ref": "${{ github.ref }}"
+          },
+          "content": {
+            "files_deployed": $(find _site -type f | wc -l | tr -d ' '),
+            "html_files": $(find _site -name "*.html" | wc -l | tr -d ' '),
+            "assets": $(find _site -type f -not -name "*.html" | wc -l | tr -d ' ')
+          }
+        }
+        EOF
+        
+    - name: Deploy to GitHub Pages
+      uses: peaceiris/actions-gh-pages@v4
+      with:
+        personal_token: ${{ secrets.GH_TOKEN }}
+        external_repository: ${{ inputs.PUBLIC_REPO }}
+        publish_branch: gh-pages
+        publish_dir: course-source/_site
+        user_name: 'github-actions[bot]'
+        user_email: 'github-actions[bot]@users.noreply.github.com'
+        commit_message: |
+          Deploy ${{ inputs.COURSE_CODE }} from ${{ github.repository }}@${{ github.sha }}
+          
+          Type: ${{ inputs.SEMESTER_INSTANCE && 'Semester Instance' || 'Base Course' }}
+          ${{ inputs.SEMESTER_INSTANCE && format('Base: {0}', inputs.BASE_REPO) || '' }}
+          ${{ inputs.SEMESTER && format('Semester: {0}', inputs.SEMESTER) || '' }}
+        force_orphan: true
+        
+    - name: Upload deployment artifacts
+      if: always()
+      uses: actions/upload-artifact@v4
+      with:
+        name: deployment-artifacts-${{ github.run_number }}
+        path: |
+          course-source/_site/deployment-metadata.json
+          course-source/_site/index.html
+        retention-days: 90
