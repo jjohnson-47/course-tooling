@@ -73,6 +73,7 @@ jobs:
         repository: ${{ github.repository_owner }}/course-tooling
         ref: main
         path: course-tooling
+        token: ${{ secrets.GH_TOKEN }}
         
     - name: Setup build tools
       run: |
